@@ -130,12 +130,25 @@ bash run_pipeline.sh
 ```
 
 Script tự động:
-1. Khởi động toàn bộ 14 Docker services
-2. Start EventSim → push events vào Kafka
-3. Chạy Spark Streaming (Kafka → HDFS) trong background
-4. Đợi 60s để tích đủ data
-5. Chạy batch pipeline: EDA → Analytics → Hive → Export
-6. Streamlit dashboard sẵn sàng
+1. **Dọn container cũ** (`docker compose down`) để tránh lỗi name conflict
+2. Khởi động toàn bộ 14 Docker services
+3. Start EventSim → push events vào Kafka
+4. Chạy Spark Streaming (Kafka → HDFS) trong background
+5. Đợi 60s để tích đủ data
+6. Chạy batch pipeline: EDA → Analytics → Hive → Export
+7. Streamlit dashboard sẵn sàng
+
+### Stop
+
+```bash
+docker compose down
+```
+
+Thêm `--volumes` nếu muốn xóa luôn data HDFS/Postgres:
+
+```bash
+docker compose down --volumes
+```
 
 ### Access UIs
 
@@ -268,6 +281,29 @@ Mặc định 2 giây. Tăng lên nếu cần giảm tải:
 ---
 
 ## Troubleshooting
+
+**Lỗi container name conflict khi chạy `docker compose up`:**
+```
+Error: Conflict. The container name "/namenode" is already in use
+```
+```bash
+# Cách 1 — dùng run_pipeline.sh (đã tích hợp sẵn bước dọn container)
+bash run_pipeline.sh
+
+# Cách 2 — dọn thủ công rồi start lại
+docker compose down --remove-orphans
+docker compose up -d
+
+# Cách 3 — nếu container đến từ project khác
+docker rm -f namenode datanode1 datanode2 resourcemanager nodemanager \
+  spark-master spark-worker-1 spark-worker-2 \
+  hive-postgres hive-metastore hive-server \
+  zookeeper kafka eventsim streamlit \
+  airflow-postgres airflow-webserver airflow-scheduler
+docker compose up -d
+```
+
+---
 
 **EventSim không connect được Kafka:**
 ```bash

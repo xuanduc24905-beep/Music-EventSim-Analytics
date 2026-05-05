@@ -12,9 +12,12 @@ echo "======================================================"
 echo " Lambda Architecture — Music Streaming Analytics"
 echo "======================================================"
 
-# ── Step 0: Khởi động tất cả services ───────────────────────
+# ── Step 0: Dọn container cũ + Khởi động services ───────────
 echo ""
-echo "[0/6] Khởi động Docker services..."
+echo "[0/6] Dọn container cũ (tránh lỗi name conflict)..."
+docker compose down --remove-orphans 2>/dev/null || true
+
+echo "      Khởi động Docker services..."
 docker compose up -d \
     namenode datanode1 datanode2 \
     resourcemanager nodemanager \
