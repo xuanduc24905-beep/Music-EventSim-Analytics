@@ -1,0 +1,440 @@
+version: "3.8"
+
+# =============================================================
+#  LAMBDA ARCHITECTURE — MUSIC STREAMING ANALYTICS
+#  Data: EventSim (music streaming event simulator)
+#  Stack: Hadoop HDFS + YARN + Spark + Kafka + Hive + Streamlit
+#  RAM khuyến nghị: 16GB+ (máy 64GB chạy thoải mái)
+# =============================================================
+
+networks:
+  hadoop-net:
+    driver: bridge
+
+volumes:
+  hadoop_namenode:
+  hadoop_datanode1:
+  hadoop_datanode2:
+  postgres_data:
+  hive_warehouse:
+  airflow_db:
+
+services:
+
+  # ===========================================================
+  # 1. HDFS NAMENODE
+  #    - Web UI: http://localhost:9870
+  # ===========================================================
+  namenode:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
+    container_name: namenode
+    hostname: namenode
+    networks:
+      - hadoop-net
+    ports:
+      - "9870:9870"
+      - "9000:9000"
+    volumes:
+      - hadoop_namenode:/hadoop/dfs/name
+      - ./data:/data
+    environment:
+      - CLUSTER_NAME=music-cluster
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+      - CORE_CONF_hadoop_http_staticuser_user=root
+      - HDFS_CONF_dfs_replication=2
+      - HDFS_CONF_dfs_namenode_datanode_registration_ip___hostname___check=false
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9870"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # ===========================================================
+  # 2. HDFS DATANODE 1
+  # ===========================================================
+  datanode1:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    container_name: datanode1
+    hostname: datanode1
+    networks:
+      - hadoop-net
+    ports:
+      - "9864:9864"
+    volumes:
+      - hadoop_datanode1:/hadoop/dfs/data
+    environment:
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+      - HDFS_CONF_dfs_replication=2
+      - SERVICE_PRECONDITION=namenode:9870
+    depends_on:
+      namenode:
+        condition: service_healthy
+
+  # ===========================================================
+  # 3. HDFS DATANODE 2
+  # ===========================================================
+  datanode2:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    container_name: datanode2
+    hostname: datanode2
+    networks:
+      - hadoop-net
+    ports:
+      - "9865:9865"
+    volumes:
+      - hadoop_datanode2:/hadoop/dfs/data
+    environment:
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+      - HDFS_CONF_dfs_replication=2
+      - SERVICE_PRECONDITION=namenode:9870
+    depends_on:
+      namenode:
+        condition: service_healthy
+
+  # ===========================================================
+  # 4. YARN RESOURCE MANAGER
+  #    - Web UI: http://localhost:8088
+  # ===========================================================
+  resourcemanager:
+    image: bde2020/hadoop-resourcemanager:2.0.0-hadoop3.2.1-java8
+    container_name: resourcemanager
+    hostname: resourcemanager
+    networks:
+      - hadoop-net
+    ports:
+      - "8088:8088"
+    environment:
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+      - YARN_CONF_yarn_resourcemanager_hostname=resourcemanager
+      - YARN_CONF_yarn_nodemanager_aux___services=mapreduce_shuffle
+      - SERVICE_PRECONDITION=namenode:9870
+    depends_on:
+      namenode:
+        condition: service_healthy
+
+  # ===========================================================
+  # 5. YARN NODE MANAGER
+  # ===========================================================
+  nodemanager:
+    image: bde2020/hadoop-nodemanager:2.0.0-hadoop3.2.1-java8
+    container_name: nodemanager
+    hostname: nodemanager
+    networks:
+      - hadoop-net
+    environment:
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+      - YARN_CONF_yarn_resourcemanager_hostname=resourcemanager
+      - YARN_CONF_yarn_nodemanager_aux___services=mapreduce_shuffle
+      - SERVICE_PRECONDITION=resourcemanager:8088
+    depends_on:
+      - resourcemanager
+
+  # ===========================================================
+  # 6. SPARK MASTER
+  #    - Web UI: http://localhost:8080
+  #    - Submit endpoint: spark://spark-master:7077
+  # ===========================================================
+  spark-master:
+    image: jupyter/pyspark-notebook:latest
+    container_name: spark-master
+    hostname: spark-master
+    networks:
+      - hadoop-net
+    ports:
+      - "8080:8080"
+      - "7077:7077"
+      - "4040:4040"
+    volumes:
+      - ./data:/data
+      - ./spark-jobs:/spark-jobs
+    environment:
+      - SPARK_MODE=master
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+    user: root
+    command: >
+      bash -c "pip install kafka-python -q && /usr/local/spark-3.5.0-bin-hadoop3/sbin/start-master.sh && tail -f /dev/null"
+    depends_on:
+      namenode:
+        condition: service_healthy
+
+  # ===========================================================
+  # 7. SPARK WORKER 1 — 10 cores, 24GB
+  # ===========================================================
+  spark-worker-1:
+    image: jupyter/pyspark-notebook:latest
+    container_name: spark-worker-1
+    hostname: spark-worker-1
+    networks:
+      - hadoop-net
+    ports:
+      - "8081:8081"
+    volumes:
+      - ./data:/data
+      - ./spark-jobs:/spark-jobs
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://spark-master:7077
+      - SPARK_WORKER_MEMORY=24G
+      - SPARK_WORKER_CORES=10
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+      - SPARK_RPC_ENCRYPTION_ENABLED=no
+      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+      - SPARK_SSL_ENABLED=no
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+    user: root
+    command: >
+      bash -c "/usr/local/spark-3.5.0-bin-hadoop3/sbin/start-worker.sh spark://spark-master:7077 && tail -f /dev/null"
+    depends_on:
+      - spark-master
+
+  # ===========================================================
+  # 8. SPARK WORKER 2
+  # ===========================================================
+  spark-worker-2:
+    image: jupyter/pyspark-notebook:latest
+    container_name: spark-worker-2
+    hostname: spark-worker-2
+    networks:
+      - hadoop-net
+    ports:
+      - "8082:8082"
+    volumes:
+      - ./data:/data
+      - ./spark-jobs:/spark-jobs
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://spark-master:7077
+      - SPARK_WORKER_MEMORY=24G
+      - SPARK_WORKER_CORES=10
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+      - SPARK_RPC_ENCRYPTION_ENABLED=no
+      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+      - SPARK_SSL_ENABLED=no
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+    user: root
+    command: >
+      bash -c "/usr/local/spark-3.5.0-bin-hadoop3/sbin/start-worker.sh spark://spark-master:7077 && tail -f /dev/null"
+    depends_on:
+      - spark-master
+
+  # ===========================================================
+  # 9. POSTGRES — Hive Metastore backend
+  # ===========================================================
+  postgres:
+    image: postgres:15
+    container_name: hive-postgres
+    hostname: postgres
+    networks:
+      - hadoop-net
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_DB=metastore
+      - POSTGRES_USER=hive
+      - POSTGRES_PASSWORD=hive123
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hive -d metastore"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ===========================================================
+  # 10. HIVE METASTORE
+  # ===========================================================
+  hive-metastore:
+    image: apache/hive:4.0.0
+    container_name: hive-metastore
+    hostname: hive-metastore
+    networks:
+      - hadoop-net
+    ports:
+      - "9083:9083"
+    volumes:
+      - hive_warehouse:/opt/hive/data/warehouse
+      - ./conf/hive-site.xml:/opt/hive/conf/hive-site.xml
+      - ./conf/postgresql-42.7.3.jar:/opt/hive/lib/postgresql-42.7.3.jar
+    environment:
+      - SERVICE_NAME=metastore
+      - DB_DRIVER=postgres
+      - SERVICE_PRECONDITION=postgres:5432 namenode:9870
+      - HIVE_METASTORE_DB_TYPE=postgres
+      - HADOOP_CONF_DIR=/opt/hadoop/etc/hadoop
+      - HADOOP_HOME=/opt/hadoop
+    depends_on:
+      postgres:
+        condition: service_healthy
+      namenode:
+        condition: service_healthy
+
+  # ===========================================================
+  # 11. HIVE SERVER 2
+  #     - JDBC: jdbc:hive2://localhost:10000
+  #     - Web UI: http://localhost:10002
+  # ===========================================================
+  hive-server:
+    image: apache/hive:4.0.0
+    container_name: hive-server
+    hostname: hive-server
+    networks:
+      - hadoop-net
+    ports:
+      - "10000:10000"
+      - "10002:10002"
+    volumes:
+      - hive_warehouse:/opt/hive/data/warehouse
+      - ./conf/hive-site.xml:/opt/hive/conf/hive-site.xml
+      - ./conf/postgresql-42.7.3.jar:/opt/hive/lib/postgresql-42.7.3.jar
+    environment:
+      - SERVICE_NAME=hiveserver2
+      - SERVICE_PRECONDITION=hive-metastore:9083
+      - DB_DRIVER=postgres
+      - IS_RESUME=true
+      - HIVE_SERVER2_THRIFT_PORT=10000
+      - HADOOP_CONF_DIR=/opt/hadoop/etc/hadoop
+      - HADOOP_HOME=/opt/hadoop
+    depends_on:
+      - hive-metastore
+
+  # ===========================================================
+  # 12. STREAMLIT DASHBOARD — Music Streaming Analytics
+  #     - Web UI: http://localhost:8501
+  # ===========================================================
+  streamlit:
+    build:
+      context: ./streamlit-app
+      dockerfile: Dockerfile
+    container_name: streamlit
+    hostname: streamlit
+    networks:
+      - hadoop-net
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./streamlit-app:/app
+      - ./data:/app/data
+    environment:
+      - HIVE_HOST=hive-server
+      - HIVE_PORT=10000
+      - HDFS_NAMENODE=namenode
+      - HDFS_PORT=9000
+    depends_on:
+      - hive-server
+    command: streamlit run /app/app.py --server.port=8501 --server.address=0.0.0.0
+
+  # ===========================================================
+  # KAFKA + ZOOKEEPER — Streaming layer
+  # ===========================================================
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.4.0
+    container_name: zookeeper
+    hostname: zookeeper
+    networks:
+      - hadoop-net
+    ports:
+      - "2181:2181"
+    environment:
+      - ZOOKEEPER_CLIENT_PORT=2181
+      - ZOOKEEPER_TICK_TIME=2000
+
+  kafka:
+    image: confluentinc/cp-kafka:7.4.0
+    container_name: kafka
+    hostname: kafka
+    networks:
+      - hadoop-net
+    ports:
+      - "9092:9092"
+    environment:
+      - KAFKA_BROKER_ID=1
+      - KAFKA_ZOOKEEPER_CONNECT=zookeeper:2181
+      - KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092
+      - KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1
+      - KAFKA_AUTO_CREATE_TOPICS_ENABLE=true
+    depends_on:
+      - zookeeper
+
+  # ===========================================================
+  # EVENTSIM — Music streaming event simulator
+  #   Generates JSON events continuously → pushes to Kafka
+  #   topic: music-events
+  # ===========================================================
+  eventsim:
+    build:
+      context: ./eventsim
+      dockerfile: Dockerfile
+    container_name: eventsim
+    hostname: eventsim
+    networks:
+      - hadoop-net
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - KAFKA_TOPIC=music-events
+      - EVENTS_PER_SECOND=10
+      - NUM_USERS=1000
+    depends_on:
+      - kafka
+    restart: unless-stopped
+
+  # ===========================================================
+  # AIRFLOW — Workflow Management
+  # ===========================================================
+  airflow-postgres:
+    image: postgres:15
+    container_name: airflow-postgres
+    networks:
+      - hadoop-net
+    environment:
+      - POSTGRES_USER=airflow
+      - POSTGRES_PASSWORD=airflow
+      - POSTGRES_DB=airflow
+    volumes:
+      - airflow_db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow -d airflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  airflow-webserver:
+    image: apache/airflow:2.8.1-python3.10
+    container_name: airflow-webserver
+    networks:
+      - hadoop-net
+    ports:
+      - "8083:8080"
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./logs:/opt/airflow/logs
+      - ./plugins:/opt/airflow/plugins
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@airflow-postgres/airflow
+      - AIRFLOW__CORE__FERNET_KEY=46BKJoQYlPPOexq0OhDZnIlNepKFf87WFwLbfzqDDho=
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+    command: bash -c "airflow db migrate && airflow users create --username admin --firstname Admin --lastname Admin --role Admin --email admin@example.com --password admin && airflow webserver"
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy
+
+  airflow-scheduler:
+    image: apache/airflow:2.8.1-python3.10
+    container_name: airflow-scheduler
+    user: root
+    networks:
+      - hadoop-net
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./logs:/opt/airflow/logs
+      - ./plugins:/opt/airflow/plugins
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@airflow-postgres/airflow
+      - AIRFLOW__CORE__FERNET_KEY=46BKJoQYlPPOexq0OhDZnIlNepKFf87WFwLbfzqDDho=
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+    command: bash -c "pip install docker && airflow scheduler"
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy

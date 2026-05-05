@@ -1,0 +1,11 @@
+# Exclude nested git repos (separate projects)
+Spotify_Track_Analysis_BigData_Project/
+VN-realestate-bigdata-analytics/
+
+# Runtime data
+data/
+logs/
+__pycache__/
+*.pyc
+*.egg-info/
+.env
