@@ -15,6 +15,14 @@ echo "======================================================"
 echo ""
 echo "[0/7] Dọn container cũ (tránh lỗi name conflict)..."
 docker compose down --remove-orphans 2>/dev/null || true
+docker rm -f \
+    namenode datanode1 datanode2 \
+    resourcemanager nodemanager \
+    spark-master spark-worker-1 spark-worker-2 \
+    hive-postgres hive-metastore hive-server \
+    zookeeper kafka eventsim streamlit \
+    airflow-postgres airflow-webserver airflow-scheduler \
+    2>/dev/null || true
 
 # ── Step 1: Khởi động services ───────────────────────────────
 echo ""
