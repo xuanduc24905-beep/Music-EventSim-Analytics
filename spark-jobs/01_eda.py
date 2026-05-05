@@ -8,7 +8,7 @@ from pyspark.sql.types import (
     StructType, StructField,
     StringType, DoubleType, LongType, IntegerType, TimestampType
 )
-import subprocess, sys
+import sys
 
 RAW_SCHEMA = StructType([
     StructField("artist",        StringType(),  True),
@@ -43,15 +43,22 @@ spark = SparkSession.builder \
 
 spark.sparkContext.setLogLevel("WARN")
 
-# Kiểm tra có parquet file thật chưa (không chỉ _spark_metadata)
-result = subprocess.run(
-    ["hdfs", "dfs", "-ls", "hdfs://namenode:9000/music/raw/"],
-    capture_output=True, text=True
-)
-parquet_ready = any(".parquet" in line for line in result.stdout.splitlines())
-if not parquet_ready:
-    print("[ERROR] /music/raw/ chưa có parquet files.")
-    print("        Hãy chạy 03_spark_streaming.py trước và đợi ít nhất 30 giây.")
+# Kiểm tra data tồn tại qua Hadoop FS API (không dùng subprocess)
+try:
+    fs = spark._jvm.org.apache.hadoop.fs.FileSystem.get(
+        spark._jvm.java.net.URI.create("hdfs://namenode:9000"),
+        spark._jsc.hadoopConfiguration()
+    )
+    raw_path = spark._jvm.org.apache.hadoop.fs.Path("hdfs://namenode:9000/music/raw/")
+    files = list(fs.listStatus(raw_path))
+    parquet_ready = any(".parquet" in str(f.getPath()) for f in files)
+    if not parquet_ready:
+        print("[ERROR] /music/raw/ chưa có parquet files.")
+        print("        Chạy streaming job trước và đợi ít nhất 30 giây.")
+        spark.stop()
+        sys.exit(1)
+except Exception as e:
+    print(f"[ERROR] Không kiểm tra được HDFS: {e}")
     spark.stop()
     sys.exit(1)
 
