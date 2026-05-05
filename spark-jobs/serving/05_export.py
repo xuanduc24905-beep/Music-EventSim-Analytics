@@ -34,18 +34,23 @@ BATCH_EXPORTS = {
     "hdfs://namenode:9000/music/batch/session_stats":    "/data/session_stats.parquet",
     "hdfs://namenode:9000/music/batch/retention":        "/data/retention.parquet",
     "hdfs://namenode:9000/music/batch/active_users_ts":  "/data/active_users_ts.parquet",
-    "hdfs://namenode:9000/music/batch/gender_stats":     "/data/gender_stats.parquet",
-    "hdfs://namenode:9000/music/batch/page_dist":        "/data/page_dist.parquet",
+    "hdfs://namenode:9000/music/batch/gender_stats":       "/data/gender_stats.parquet",
+    "hdfs://namenode:9000/music/batch/page_dist":          "/data/page_dist.parquet",
+    "hdfs://namenode:9000/music/batch/top_locations":      "/data/top_locations.parquet",
+    # ML outputs
+    "hdfs://namenode:9000/music/batch/segment_profiles":   "/data/segment_profiles.parquet",
+    "hdfs://namenode:9000/music/batch/user_segments":      "/data/user_segments.parquet",
+    "hdfs://namenode:9000/music/batch/churn_predictions":  "/data/churn_predictions.parquet",
+    "hdfs://namenode:9000/music/batch/churn_summary":      "/data/churn_summary.parquet",
 }
 
 batch_total = 0
 try:
-    df_raw = spark.read.parquet("hdfs://namenode:9000/music/raw/") \
-                  .filter(F.col("page") == "NextSong")
+    df_raw = spark.read.parquet("hdfs://namenode:9000/music/batch/clean")
     batch_total = df_raw.count()
-    print(f"Batch raw NextSong events: {batch_total:,}")
+    print(f"Batch clean events: {batch_total:,}")
 except Exception as e:
-    print(f"[WARN] Không đọc được raw data: {e}")
+    print(f"[WARN] Không đọc được clean data: {e}")
 
 for hdfs_path, local_path in BATCH_EXPORTS.items():
     try:

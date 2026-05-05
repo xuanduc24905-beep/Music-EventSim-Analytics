@@ -27,34 +27,37 @@ spark.sql("USE music")
 # BATCH LAYER — Batch Views
 # ══════════════════════════════════════════════════════════════
 
-# ── 1. play_events (batch raw parquet) ───────────────────────
+# ── 1. play_events (batch clean — đã filter NextSong + dedup) ─
 spark.sql("DROP TABLE IF EXISTS music.play_events")
 spark.sql("""
     CREATE EXTERNAL TABLE music.play_events (
-        artist         STRING,
-        song           STRING,
-        duration       DOUBLE,
-        ts             BIGINT,
-        userId         INT,
-        sessionId      INT,
-        page           STRING,
-        level          STRING,
-        location       STRING,
-        userAgent      STRING,
-        gender         STRING,
-        firstName      STRING,
-        lastName       STRING,
-        registration   BIGINT,
-        itemInSession  INT,
-        status         INT,
-        method         STRING
+        artist          STRING,
+        song            STRING,
+        duration        DOUBLE,
+        ts              BIGINT,
+        userId          INT,
+        sessionId       INT,
+        page            STRING,
+        level           STRING,
+        location        STRING,
+        userAgent       STRING,
+        gender          STRING,
+        firstName       STRING,
+        lastName        STRING,
+        registration    BIGINT,
+        itemInSession   INT,
+        status          INT,
+        method          STRING,
+        event_ts        TIMESTAMP,
+        kafka_timestamp TIMESTAMP,
+        ingestion_time  TIMESTAMP
     )
     STORED AS PARQUET
-    LOCATION 'hdfs://namenode:9000/music/raw'
+    LOCATION 'hdfs://namenode:9000/music/batch/clean'
 """)
 
-batch_total = spark.sql("SELECT COUNT(*) AS cnt FROM music.play_events WHERE page = 'NextSong'").collect()[0]["cnt"]
-print(f"Batch play_events (NextSong): {batch_total:,}")
+batch_total = spark.sql("SELECT COUNT(*) AS cnt FROM music.play_events").collect()[0]["cnt"]
+print(f"Batch play_events (clean): {batch_total:,}")
 
 # ── 2. top_songs ──────────────────────────────────────────────
 spark.sql("DROP TABLE IF EXISTS music.top_songs")
@@ -67,7 +70,6 @@ spark.sql("""
         COUNT(DISTINCT userId) AS unique_listeners,
         ROUND(AVG(duration), 1) AS avg_duration_sec
     FROM music.play_events
-    WHERE page = 'NextSong'
     GROUP BY song, artist
     ORDER BY play_count DESC
     LIMIT 100
@@ -83,7 +85,6 @@ spark.sql("""
         COUNT(DISTINCT userId) AS unique_listeners,
         COUNT(DISTINCT song) AS unique_songs
     FROM music.play_events
-    WHERE page = 'NextSong'
     GROUP BY artist
     ORDER BY play_count DESC
     LIMIT 100
@@ -94,13 +95,12 @@ spark.sql("DROP TABLE IF EXISTS music.plays_by_hour")
 spark.sql("""
     CREATE TABLE music.plays_by_hour AS
     SELECT
-        HOUR(FROM_UNIXTIME(CAST(ts / 1000 AS BIGINT))) AS hour_of_day,
+        HOUR(event_ts) AS hour_of_day,
         COUNT(*) AS play_count,
         COUNT(DISTINCT userId) AS active_users,
         ROUND(AVG(duration), 1) AS avg_duration_sec
     FROM music.play_events
-    WHERE page = 'NextSong'
-    GROUP BY HOUR(FROM_UNIXTIME(CAST(ts / 1000 AS BIGINT)))
+    GROUP BY HOUR(event_ts)
     ORDER BY hour_of_day
 """)
 
@@ -115,7 +115,6 @@ spark.sql("""
         ROUND(AVG(duration), 1) AS avg_duration_sec,
         ROUND(SUM(duration) / 3600, 2) AS total_hours_played
     FROM music.play_events
-    WHERE page = 'NextSong'
     GROUP BY level
 """)
 
