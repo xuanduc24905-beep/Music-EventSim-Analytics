@@ -1,59 +1,71 @@
 # Music Streaming Analytics — Lambda Architecture
 
-> **Big Data pipeline** giả lập hệ thống analytics của một music streaming service (Spotify-like), xây dựng trên kiến trúc Lambda với EventSim làm data source thay vì file CSV tĩnh.
+> End-to-end **Big Data pipeline** mô phỏng hệ thống analytics của một nền tảng music streaming (Spotify-like).  
+> Dữ liệu được sinh real-time bởi **EventSim**, xử lý song song qua kiến trúc **Lambda** (Batch + Speed + Serving), và trực quan hoá trên **BI Dashboard** phục vụ Marketing & Product teams.
 
 ---
 
-## Architecture Overview
+## Architecture
 
 ```
-EventSim container
-(generate JSON events → push vào Kafka liên tục)
-        │
-        ▼
-Kafka topic: music-events
-        │
-        ├─────────────────────────────────────┐
-        ▼                                     ▼
-  BATCH LAYER                           SPEED LAYER
-  HDFS /music/raw/                 03_spark_streaming.py
-        │                          (Kafka → HDFS append)
-  01_eda.py                               │
-  02_analytics.py                   HDFS /music/streaming/
-  (top artists, peak hours,               │
-   free vs paid, retention)               │
-        │                                 │
-  04_hive_load.py                         │
-  (Hive tables)                           │
-        │                                 │
-  05_export.py                            │
-  (HDFS → /data/*.parquet)                │
-        │                                 │
-        └──────────────┬──────────────────┘
-                       ▼
-               SERVING LAYER
-         Hive Metastore (PostgreSQL)
-         merged_events VIEW (batch UNION stream)
-                       │
-                       ▼
-          Streamlit Dashboard :8501
+┌─────────────────────────────────────────────────────────────────────┐
+│                         DATA INGESTION                              │
+│                                                                     │
+│   EventSim  ──►  Kafka (music-events)  ──►  HDFS /music/raw/       │
+│   (1000 users · ~10 events/s)                                       │
+└────────────────────────────┬────────────────────────────────────────┘
+                             │
+              ┌──────────────┴──────────────┐
+              ▼                             ▼
+   ┌──────────────────┐         ┌──────────────────────┐
+   │   BATCH LAYER    │         │    SPEED LAYER       │
+   │                  │         │                      │
+   │ 00_batch_proc.py │         │ 03_spark_streaming.py│
+   │ (clean + dedup)  │         │ Kafka → HDFS/stream  │
+   │        ↓         │         │  trigger: 2s         │
+   │ 01_eda.py        │         └──────────┬───────────┘
+   │ 02_analytics.py  │                    │
+   │ 03_kmeans.py     │         ┌──────────▼───────────┐
+   │ 04_churn_pred.py │         │  HDFS /music/        │
+   │                  │         │  streaming/          │
+   │ HDFS /music/     │         └──────────────────────┘
+   │ batch/           │                    │
+   └────────┬─────────┘                    │
+            │                              │
+            └──────────────┬───────────────┘
+                           ▼
+              ┌────────────────────────┐
+              │     SERVING LAYER      │
+              │                        │
+              │  04_hive_load.py       │
+              │  (Hive + merged VIEW)  │
+              │         ↓              │
+              │  05_export.py          │
+              │  (HDFS → /data/*.pq)   │
+              └───────────┬────────────┘
+                          ▼
+              ┌────────────────────────┐
+              │   Streamlit Dashboard  │
+              │   :8501  (dark BI UI)  │
+              └────────────────────────┘
 ```
 
 ---
 
-## Stack
+## Tech Stack
 
-| Component | Technology |
-|---|---|
-| Event Simulator | Python (EventSim — custom) |
-| Message Queue | Apache Kafka 7.4.0 + Zookeeper |
-| Distributed Storage | Hadoop HDFS 3.2.1 (1 namenode + 2 datanodes) |
-| Resource Manager | YARN (resourcemanager + nodemanager) |
-| Batch Processing | Apache Spark 3.5.0 (1 master + 2 workers) |
-| Stream Processing | Spark Structured Streaming |
-| Metadata Store | Apache Hive 4.0.0 + PostgreSQL 15 |
-| Orchestration | Apache Airflow 2.8.1 |
-| Dashboard | Streamlit 1.32.0 + Plotly |
+| Layer | Technology | Version |
+|---|---|---|
+| Event Simulator | Python (custom EventSim) | — |
+| Message Queue | Apache Kafka + Zookeeper | 7.4.0 |
+| Distributed Storage | Hadoop HDFS (1 NN + 2 DN) | 3.2.1 |
+| Resource Manager | YARN | 3.2.1 |
+| Batch / Stream Processing | Apache Spark | 4.x |
+| ML / Analytics | Spark MLlib (KMeans, Random Forest) | — |
+| Metadata Store | Apache Hive + PostgreSQL | 4.0.0 / 15 |
+| Orchestration | Apache Airflow | 2.8.1 |
+| Dashboard | Streamlit + Plotly | 1.35.0 |
+| Containerisation | Docker Compose | v2 |
 
 ---
 
@@ -61,34 +73,231 @@ Kafka topic: music-events
 
 ```
 Music-EventSim-Analytics/
-├── docker-compose.yml          # 14 services, toàn bộ stack
-├── run_pipeline.sh             # One-command pipeline runner
-├── conf/
-│   ├── hive-site.xml           # Hive metastore config (PostgreSQL backend)
-│   ├── hive-queries.sql        # DDL cho music domain
-│   └── postgresql-42.7.3.jar  # JDBC driver
+│
+├── docker-compose.yml            # 14+ services
+├── run_pipeline.sh               # One-command pipeline runner
+├── start_services.sh             # One-time infra startup
+│
 ├── eventsim/
 │   ├── Dockerfile
-│   └── simulator.py            # Python event generator → Kafka
+│   └── simulator.py              # Event generator → Kafka
+│
 ├── spark-jobs/
-│   ├── 01_eda.py               # EDA: overview stats, top songs/artists
-│   ├── 02_analytics.py         # Analytics: peak hours, retention, session dist
-│   ├── 03_spark_streaming.py   # Kafka → HDFS (batch raw + speed layer)
-│   ├── 04_hive_load.py         # Hive tables + merged serving view
-│   └── 05_export.py            # HDFS → /data/*.parquet cho Streamlit
-├── dags/
-│   └── music_batch_dag.py      # Airflow DAG (@hourly)
-└── streamlit-app/
-    ├── app.py                  # Dashboard (5 charts + live feed)
-    ├── requirements.txt
-    └── Dockerfile
+│   ├── batch/
+│   │   ├── 00_batch_processing.py  # Raw ingestion → clean (filter + dedup)
+│   │   ├── 01_eda.py               # EDA: overview, top songs/artists, locations
+│   │   ├── 02_analytics.py         # Analytics: retention, session dist, active users
+│   │   ├── 03_kmeans.py            # ML: KMeans user segmentation (4 clusters)
+│   │   └── 04_churn_prediction.py  # ML: Random Forest churn prediction
+│   │
+│   ├── speed/
+│   │   └── 03_spark_streaming.py   # Kafka → HDFS /music/streaming/ (2s trigger)
+│   │
+│   └── serving/
+│       ├── 04_hive_load.py         # Hive tables + merged_events VIEW
+│       └── 05_export.py            # HDFS → /data/*.parquet for Streamlit
+│
+├── spark/
+│   └── Dockerfile                  # Spark image + numpy/MLlib dependencies
+│
+├── streamlit-app/
+│   ├── app.py                      # Single-page BI dashboard
+│   ├── requirements.txt
+│   └── Dockerfile
+│
+├── conf/
+│   ├── hive-site.xml
+│   └── hive-queries.sql
+│
+└── dags/
+    └── music_batch_dag.py          # Airflow DAG (@hourly)
 ```
+
+---
+
+## Quick Start
+
+### Requirements
+
+- Docker Desktop ≥ v24 với **Docker Compose v2**
+- RAM: **≥ 16 GB** allocated cho Docker (khuyến nghị 32–48 GB)
+- WSL2 (Windows): xem [WSL Memory Config](#wsl2-memory-config)
+
+### 1. Clone & Start Services
+
+```bash
+git clone https://github.com/XuanDuc/Music-EventSim-Analytics.git
+cd Music-EventSim-Analytics
+
+# Khởi động toàn bộ infrastructure (chỉ cần chạy 1 lần)
+bash start_services.sh
+```
+
+`start_services.sh` thực hiện:
+- Khởi động 14 Docker containers
+- Chờ HDFS, Kafka, Spark sẵn sàng (health checks)
+- Start EventSim → push events liên tục vào Kafka
+- Start Spark Streaming job (Kafka → HDFS) trong background
+
+### 2. Run Analytics Pipeline
+
+```bash
+bash run_pipeline.sh
+```
+
+Pipeline thực hiện **7 bước** tuần tự:
+
+| Bước | Job | Mô tả |
+|---|---|---|
+| 1/7 | `00_batch_processing.py` | Đọc `/music/raw/` → filter NextSong → dedup → `/music/batch/clean/` |
+| 2/7 | `01_eda.py` | EDA: overview stats, top songs/artists, peak hours, locations |
+| 3/7 | `02_analytics.py` | Analytics: retention, session distribution, active users timeline |
+| 4/7 | `03_kmeans.py` | KMeans clustering → 4 user segments |
+| 5/7 | `04_churn_prediction.py` | Random Forest → churn probability per user |
+| 6/7 | `04_hive_load.py` | Load Hive tables + `merged_events` VIEW (batch ∪ stream) |
+| 7/7 | `05_export.py` | Export `/data/*.parquet` cho Streamlit |
+
+> Streaming job tự động **dừng** trước batch để giải phóng Spark executors, và **khởi động lại** sau khi pipeline hoàn tất.
+
+### 3. Access Dashboard
+
+| Service | URL | Credentials |
+|---|---|---|
+| **Streamlit Dashboard** | http://localhost:8501 | — |
+| Spark Master UI | http://localhost:8080 | — |
+| HDFS NameNode UI | http://localhost:9870 | — |
+| YARN ResourceManager | http://localhost:8088 | — |
+| Airflow | http://localhost:8083 | admin / admin |
+| HiveServer2 | http://localhost:10002 | — |
+
+### Stop
+
+```bash
+docker compose down                 # Giữ volumes (data HDFS/Postgres)
+docker compose down --volumes       # Xoá toàn bộ data
+```
+
+---
+
+## Lambda Architecture — Chi tiết
+
+### Batch Layer
+
+Xử lý **toàn bộ historical data** trong HDFS, đảm bảo tính chính xác tuyệt đối.
+
+**Data flow:**
+```
+/music/raw/  →  00_batch_processing  →  /music/batch/clean/
+                                               │
+                    ┌──────────────────────────┤
+                    ▼                          ▼
+              01_eda.py                  02_analytics.py
+         (EDA & distributions)       (business metrics)
+                    │                          │
+                    └──────────┬───────────────┘
+                               ▼
+                    /music/batch/{overview, top_songs,
+                     top_artists, plays_by_hour,
+                     retention, session_dist,
+                     level_ratio, gender_stats,
+                     top_locations, user_segments,
+                     churn_predictions, ...}
+```
+
+**`00_batch_processing.py`** — Single source of truth cho toàn bộ batch layer:
+- Đọc raw events với schema tường minh
+- Filter `page == "NextSong"`
+- Dedup theo `(userId, sessionId, ts)`
+- Cast `event_ts` từ epoch milliseconds
+
+### Speed Layer
+
+Giảm độ trễ xuống **dưới 10 giây** cho data mới nhất.
+
+`03_spark_streaming.py`:
+- Subscribe Kafka topic `music-events`
+- Parse JSON → filter NextSong
+- Ghi append vào `HDFS /music/streaming/` mỗi **2 giây**
+- Streamlit đọc trực tiếp qua WebHDFS API (không cần batch)
+
+### Serving Layer
+
+Merge batch + speed thành unified view:
+
+```sql
+-- Hive: merged_events VIEW
+SELECT ..., 'batch' AS data_source FROM music.play_events
+UNION ALL
+SELECT ..., 'stream' AS data_source FROM music.streaming_events
+```
+
+`05_export.py` tính thêm:
+```
+merged_plays = batch_play_count + stream_play_count
+```
+
+---
+
+## ML Pipeline
+
+### KMeans User Segmentation (`03_kmeans.py`)
+
+Features: `total_plays`, `unique_artists`, `unique_songs`, `total_sessions`, `avg_duration`, `active_days`, `level`
+
+Pipeline: `StringIndexer → VectorAssembler → StandardScaler → KMeans(k=4)`
+
+Output segments:
+
+| Segment | Đặc điểm |
+|---|---|
+| **Power Users** | Plays cao, nhiều artists, nhiều ngày active |
+| **Regular Listeners** | Engagement trung bình, ổn định |
+| **Casual Listeners** | Ít plays, ngắn session |
+| **At-Risk Users** | Engagement thấp, dấu hiệu rời bỏ |
+
+### Churn Prediction (`04_churn_prediction.py`)
+
+Label: engagement-based — bottom quartile `plays_per_day` × `active_days` = churned (1)
+
+Features: `total_plays`, `unique_artists`, `unique_songs`, `total_sessions`, `avg_duration`, `active_days`, `days_span`, `plays_per_day`, `level`
+
+Model: `RandomForestClassifier(numTrees=100, maxDepth=6)`
+
+Output: `churn_probability` [0–1] + `risk_level` (High / Medium / Low)
+
+---
+
+## Dashboard
+
+Single-page dark BI dashboard (Spotify aesthetic), không có tabs — tất cả trên một màn hình scroll:
+
+```
+┌────────────────────────────────────────────────────┐
+│  Header: Title + Live badge + Last sync            │
+├──────────┬──────────┬──────────┬──────────────────┤
+│  Total   │   MAU    │  Churn   │   Top Artist     │  ← KPI Cards
+│  Streams │          │  Rate    │                  │
+├──────────────────────────────┬─────────────────────┤
+│  Hourly Traffic Peaks        │  Free vs Paid       │  ← Row 2
+│  (Batch vs Real-time area)   │  (Donut chart)      │
+├────────────────────┬─────────┴─────────────────────┤
+│  Customer          │  Churn Gauge (Indicator)      │  ← Row 3
+│  Segmentation      │  + At-Risk Premium Users list │
+│  (KMeans Scatter)  │                               │
+├────────────────────┴──────────────┬────────────────┤
+│  Top Locations (H-Bar)            │ Gender Split   │  ← Row 4
+└───────────────────────────────────┴────────────────┘
+│  Live Ticker — bài đang nghe real-time (3s refresh)│
+└────────────────────────────────────────────────────┘
+```
+
+**Live Ticker** dùng `@st.experimental_fragment(run_every=3)` — chỉ refresh phần live feed, không reload cả trang.
 
 ---
 
 ## Event Schema
 
-EventSim generate JSON events theo schema sau, chỉ `page = "NextSong"` được xử lý cho music analytics:
+EventSim sinh JSON events theo schema:
 
 ```json
 {
@@ -112,220 +321,119 @@ EventSim generate JSON events theo schema sau, chỉ `page = "NextSong"` đượ
 }
 ```
 
----
+Chỉ events có `page == "NextSong"` được đưa vào analytics pipeline.
 
-## Quick Start
-
-### Prerequisites
-
-- Docker Desktop với ít nhất **16GB RAM** allocated
-- Docker Compose v2+
-
-### Run
+**EventSim config:**
+- 1,000 users với profile cố định (gender, level, location)
+- 40 artists × catalog bài hát riêng
+- Page weights: 75% NextSong, 8% Home, 4% Login, ...
+- Session reset ngẫu nhiên ~5%/event
+- Default: **10 events/giây**
 
 ```bash
-git clone https://github.com/xuanduc24905-beep/Music-EventSim-Analytics.git
-cd Music-EventSim-Analytics
-bash run_pipeline.sh
+# Tuỳ chỉnh tốc độ
+EVENTS_PER_SECOND=50 docker compose up eventsim -d
 ```
-
-Script tự động:
-1. **Dọn container cũ** (`docker compose down`) để tránh lỗi name conflict
-2. Khởi động toàn bộ 14 Docker services
-3. Start EventSim → push events vào Kafka
-4. Chạy Spark Streaming (Kafka → HDFS) trong background
-5. Đợi 60s để tích đủ data
-6. Chạy batch pipeline: EDA → Analytics → Hive → Export
-7. Streamlit dashboard sẵn sàng
-
-### Stop
-
-```bash
-docker compose down
-```
-
-Thêm `--volumes` nếu muốn xóa luôn data HDFS/Postgres:
-
-```bash
-docker compose down --volumes
-```
-
-### Access UIs
-
-| Service | URL | Credentials |
-|---|---|---|
-| Streamlit Dashboard | http://localhost:8501 | — |
-| Spark Master | http://localhost:8080 | — |
-| HDFS NameNode | http://localhost:9870 | — |
-| YARN ResourceManager | http://localhost:8088 | — |
-| Airflow | http://localhost:8083 | admin / admin |
-| HiveServer2 Web | http://localhost:10002 | — |
-
----
-
-## Lambda Architecture — Chi tiết
-
-### Batch Layer
-
-Xử lý toàn bộ historical data trong `/music/raw/`, đảm bảo tính **chính xác tuyệt đối**:
-
-| Spark Job | Input | Output (HDFS /music/batch/) |
-|---|---|---|
-| `01_eda.py` | `/music/raw/` | overview, top_songs, top_artists, plays_by_hour, level_stats, gender_stats |
-| `02_analytics.py` | `/music/raw/` | top10_songs, top10_artists, plays_by_hour, level_ratio, session_dist, retention, active_users_ts |
-| `04_hive_load.py` | HDFS batch paths | Hive tables + merged_events VIEW |
-| `05_export.py` | HDFS batch paths | `/data/*.parquet` cho Streamlit |
-
-### Speed Layer
-
-Xử lý data mới nhất **chưa được batch pipeline đọc**, giảm độ trễ xuống vài giây:
-
-- `03_spark_streaming.py` đọc Kafka → filter `NextSong` → ghi vào `/music/streaming/` mỗi **2 giây**
-- Đồng thời ghi raw events vào `/music/raw/` để batch layer tích lũy dữ liệu
-
-### Serving Layer
-
-Hive `merged_events` VIEW = `UNION ALL` của batch table và streaming table:
-
-```sql
-SELECT ..., 'batch' AS data_source FROM music.play_events
-UNION ALL
-SELECT ..., 'stream' AS data_source FROM music.streaming_events
-```
-
-`05_export.py` merge kết quả:
-```
-merged_plays = batch_play_count + stream_play_count
-```
-
----
-
-## Streamlit Dashboard
-
-5 charts chính + live feed:
-
-| Chart | Mô tả |
-|---|---|
-| **Top 10 Songs** | Horizontal bar — bài được nghe nhiều nhất (merged) |
-| **Top 10 Artists** | Horizontal bar — nghệ sĩ phổ biến nhất (merged) |
-| **Plays by Hour** | Line chart — peak listening hours trong ngày |
-| **Free vs Paid** | Donut pie — tỷ lệ user tier |
-| **Session Distribution** | Histogram — số bài nghe mỗi session |
-| **Active Users Over Time** | Area chart — timeline user active |
-| **User Retention** | Stacked bar — new vs returning users theo ngày |
-| **Live Feed** | Card list — events mới nhất từ Kafka stream |
-
-Auto-refresh **30 giây**. Sidebar hiển thị trạng thái 3 Lambda layers (Batch / Speed / Serving).
 
 ---
 
 ## Airflow DAG
 
-DAG `music_batch_pipeline` chạy **@hourly**, tự động:
+DAG `music_batch_pipeline` chạy **@hourly**, tự động trigger toàn bộ batch pipeline:
 
 ```
 wait_for_hdfs_data
         │
         ▼
-   spark_eda (01_eda.py)
+batch_processing (00)
         │
         ▼
-spark_analytics (02_analytics.py)
-        │
-        ▼
-  hive_load (04_hive_load.py)
-        │
-        ▼
-export_parquet (05_export.py)
+spark_eda (01)  ──►  spark_analytics (02)
+                              │
+                    ┌─────────┴─────────┐
+                    ▼                   ▼
+             kmeans (03)       churn_prediction (04)
+                    └─────────┬─────────┘
+                              ▼
+                       hive_load (04_serving)
+                              │
+                              ▼
+                      export_parquet (05)
 ```
 
 ---
 
-## EventSim
+## WSL2 Memory Config
 
-Thay vì dùng image `seatgeek/eventsim` (khó pull), project dùng Python simulator tự viết:
+Trên Windows, WSL2 mặc định chỉ lấy 50% RAM hoặc 8GB. Tạo/chỉnh file `C:\Users\<username>\.wslconfig`:
 
-- **1000 users** với profile cố định (gender, level free/paid, location)
-- **40 artists** × catalog bài hát riêng mỗi artist
-- **Page weights**: 75% NextSong, 8% Home, 4% Login, ...
-- Session reset ngẫu nhiên (~5% mỗi event)
-- Tốc độ mặc định: **10 events/giây** (cấu hình qua env `EVENTS_PER_SECOND`)
-
-```bash
-# Tùy chỉnh tốc độ và số user
-EVENTS_PER_SECOND=50 NUM_USERS=5000 docker compose up eventsim
+```ini
+[wsl2]
+memory=48GB
+processors=16
+swap=8GB
 ```
+
+Sau đó restart WSL:
+```powershell
+wsl --shutdown
+```
+
+Khuyến nghị cho máy 64GB: `memory=52GB` (giữ ~12GB cho Windows).
 
 ---
 
-## Configuration
-
-### docker-compose.yml — Resource
+## Resource Configuration
 
 | Service | Memory | Cores |
 |---|---|---|
 | spark-worker-1 | 24GB | 10 |
 | spark-worker-2 | 24GB | 10 |
 
-Máy ít RAM có thể giảm `SPARK_WORKER_MEMORY` xuống `8G`.
-
-### Streaming trigger
-
-Mặc định 2 giây. Tăng lên nếu cần giảm tải:
-
-```python
-# 03_spark_streaming.py
-.trigger(processingTime="10 seconds")
+Máy RAM thấp hơn — chỉnh trong `docker-compose.yml`:
+```yaml
+SPARK_WORKER_MEMORY: 8g
+SPARK_WORKER_CORES: 4
 ```
 
 ---
 
 ## Troubleshooting
 
-**Lỗi container name conflict khi chạy `docker compose up`:**
-```
-Error: Conflict. The container name "/namenode" is already in use
-```
+**Spark job báo "Initial job has not accepted any resources":**
 ```bash
-# Cách 1 — dùng run_pipeline.sh (đã tích hợp sẵn bước dọn container)
+# Streaming job đang chiếm executors — kill và chạy lại pipeline
+docker exec spark-master bash -c "pkill -f 03_spark_streaming || true"
 bash run_pipeline.sh
+```
 
-# Cách 2 — dọn thủ công rồi start lại
+**HDFS chưa có data:**
+```bash
+docker exec namenode hdfs dfs -ls /music/raw/
+docker logs eventsim | tail -20
+```
+
+**MLlib lỗi `No module named 'numpy'`:**
+```bash
+# Rebuild Spark image
+docker compose up -d --build --no-deps spark-master spark-worker-1 spark-worker-2
+```
+
+**Container name conflict:**
+```bash
 docker compose down --remove-orphans
 docker compose up -d
-
-# Cách 3 — nếu container đến từ project khác
-docker rm -f namenode datanode1 datanode2 resourcemanager nodemanager \
-  spark-master spark-worker-1 spark-worker-2 \
-  hive-postgres hive-metastore hive-server \
-  zookeeper kafka eventsim streamlit \
-  airflow-postgres airflow-webserver airflow-scheduler
-docker compose up -d
 ```
 
----
-
-**EventSim không connect được Kafka:**
+**Xem log streaming:**
 ```bash
-docker logs eventsim
-# Kafka cần ~30s để sẵn sàng sau khi start, eventsim có retry logic tự động
-```
-
-**Spark job báo lỗi `/music/raw/ not found`:**
-```bash
-# Streaming chưa ghi đủ data, chờ thêm hoặc kiểm tra
-docker exec namenode hdfs dfs -ls /music/raw/
+docker exec spark-master tail -f /tmp/streaming.log
 ```
 
 **Hive metastore lỗi connection:**
 ```bash
-# Đợi postgres healthy trước
+# Postgres cần healthy trước
 docker compose ps hive-postgres
-```
-
-**Xem logs streaming job:**
-```bash
-docker exec spark-master tail -f /tmp/streaming.log
 ```
 
 ---
