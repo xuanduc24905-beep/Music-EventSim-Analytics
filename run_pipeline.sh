@@ -36,10 +36,25 @@ docker compose up -d \
     streamlit \
     airflow-postgres airflow-webserver airflow-scheduler
 
-echo "      Đợi HDFS + Kafka sẵn sàng (60s)..."
-sleep 60
+echo "      Đợi HDFS namenode healthy..."
+until docker exec namenode curl -sf http://localhost:9870 > /dev/null 2>&1; do
+    printf "."; sleep 5
+done
+echo " [OK] HDFS"
 
-# Tìm spark-submit path sau khi container đã up
+echo "      Đợi Kafka sẵn sàng..."
+until docker exec kafka kafka-topics --bootstrap-server localhost:9092 --list > /dev/null 2>&1; do
+    printf "."; sleep 5
+done
+echo " [OK] Kafka"
+
+echo "      Đợi Spark master sẵn sàng..."
+until docker exec spark-master curl -sf http://localhost:8080 > /dev/null 2>&1; do
+    printf "."; sleep 3
+done
+echo " [OK] Spark"
+
+# Tìm spark-submit path
 SPARK_BIN=$(docker exec spark-master bash -c "which spark-submit 2>/dev/null || find /usr/local -name spark-submit 2>/dev/null | head -1")
 SPARK_SUBMIT="${SPARK_BIN} --master spark://spark-master:7077"
 echo "      spark-submit: ${SPARK_BIN}"
