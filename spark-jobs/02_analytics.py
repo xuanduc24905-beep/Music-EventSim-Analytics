@@ -42,9 +42,9 @@ RAW_SCHEMA = StructType([
 spark = SparkSession.builder \
     .appName("Music Analytics") \
     .master("spark://spark-master:7077") \
-    .config("spark.executor.memory", "8g") \
+    .config("spark.executor.memory", "4g") \
     .config("spark.executor.cores", "4") \
-    .config("spark.sql.shuffle.partitions", "16") \
+    .config("spark.sql.shuffle.partitions", "8") \
     .getOrCreate()
 
 spark.sparkContext.setLogLevel("WARN")

@@ -135,7 +135,9 @@ services:
   #    - Submit endpoint: spark://spark-master:7077
   # ===========================================================
   spark-master:
-    image: jupyter/pyspark-notebook:latest
+    build:
+      context: ./spark
+      dockerfile: Dockerfile
     container_name: spark-master
     hostname: spark-master
     networks:
@@ -148,11 +150,10 @@ services:
       - ./data:/data
       - ./spark-jobs:/spark-jobs
     environment:
-      - SPARK_MODE=master
-      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+      - SPARK_NO_DAEMONIZE=true
     user: root
     command: >
-      bash -c "pip install kafka-python -q && /usr/local/spark-3.5.0-bin-hadoop3/sbin/start-master.sh && tail -f /dev/null"
+      bash -c "/opt/spark/sbin/start-master.sh && tail -f /opt/spark/logs/*.out"
     depends_on:
       namenode:
         condition: service_healthy
@@ -161,7 +162,9 @@ services:
   # 7. SPARK WORKER 1 — 10 cores, 24GB
   # ===========================================================
   spark-worker-1:
-    image: jupyter/pyspark-notebook:latest
+    build:
+      context: ./spark
+      dockerfile: Dockerfile
     container_name: spark-worker-1
     hostname: spark-worker-1
     networks:
@@ -172,18 +175,11 @@ services:
       - ./data:/data
       - ./spark-jobs:/spark-jobs
     environment:
-      - SPARK_MODE=worker
-      - SPARK_MASTER_URL=spark://spark-master:7077
-      - SPARK_WORKER_MEMORY=24G
+      - SPARK_WORKER_MEMORY=24g
       - SPARK_WORKER_CORES=10
-      - SPARK_RPC_AUTHENTICATION_ENABLED=no
-      - SPARK_RPC_ENCRYPTION_ENABLED=no
-      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
-      - SPARK_SSL_ENABLED=no
-      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
     user: root
     command: >
-      bash -c "/usr/local/spark-3.5.0-bin-hadoop3/sbin/start-worker.sh spark://spark-master:7077 && tail -f /dev/null"
+      bash -c "/opt/spark/sbin/start-worker.sh spark://spark-master:7077 && tail -f /opt/spark/logs/*.out"
     depends_on:
       - spark-master
 
@@ -191,7 +187,9 @@ services:
   # 8. SPARK WORKER 2
   # ===========================================================
   spark-worker-2:
-    image: jupyter/pyspark-notebook:latest
+    build:
+      context: ./spark
+      dockerfile: Dockerfile
     container_name: spark-worker-2
     hostname: spark-worker-2
     networks:
@@ -202,18 +200,12 @@ services:
       - ./data:/data
       - ./spark-jobs:/spark-jobs
     environment:
-      - SPARK_MODE=worker
-      - SPARK_MASTER_URL=spark://spark-master:7077
-      - SPARK_WORKER_MEMORY=24G
+      - SPARK_WORKER_MEMORY=24g
       - SPARK_WORKER_CORES=10
-      - SPARK_RPC_AUTHENTICATION_ENABLED=no
-      - SPARK_RPC_ENCRYPTION_ENABLED=no
-      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
-      - SPARK_SSL_ENABLED=no
-      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+      - SPARK_WORKER_WEBUI_PORT=8082
     user: root
     command: >
-      bash -c "/usr/local/spark-3.5.0-bin-hadoop3/sbin/start-worker.sh spark://spark-master:7077 && tail -f /dev/null"
+      bash -c "/opt/spark/sbin/start-worker.sh spark://spark-master:7077 && tail -f /opt/spark/logs/*.out"
     depends_on:
       - spark-master
 

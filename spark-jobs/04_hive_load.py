@@ -10,7 +10,7 @@ from pyspark.sql import functions as F
 spark = SparkSession.builder \
     .appName("Music Hive Load") \
     .master("spark://spark-master:7077") \
-    .config("spark.executor.memory", "8g") \
+    .config("spark.executor.memory", "4g") \
     .config("spark.executor.cores", "4") \
     .config("spark.sql.warehouse.dir", "hdfs://namenode:9000/user/hive/warehouse") \
     .config("hive.metastore.uris", "thrift://hive-metastore:9083") \
@@ -49,7 +49,6 @@ spark.sql("""
         status         INT,
         method         STRING
     )
-    ROW FORMAT SERDE 'org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe'
     STORED AS PARQUET
     LOCATION 'hdfs://namenode:9000/music/raw'
 """)

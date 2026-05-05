@@ -1,74 +1,103 @@
 #!/usr/bin/env bash
 # ============================================================
-#  run_pipeline.sh — Chạy batch pipeline (services phải up sẵn)
-#  Yêu cầu: chạy start_services.sh trước
+#  run_pipeline.sh — Lambda Architecture Pipeline
+#
+#  BATCH LAYER  : độc lập với Kafka, đọc HDFS /music/raw/
+#  SPEED LAYER  : Kafka → Spark Streaming → HDFS /music/streaming/
+#  SERVING LAYER: merge batch + speed → /data/*.parquet → Streamlit
+#
+#  Kafka/Streaming chết → batch vẫn chạy bình thường trên data cũ
 # ============================================================
 set -e
 
+SPARK_SUBMIT="docker exec spark-master /opt/spark/bin/spark-submit --master spark://spark-master:7077"
+
 echo "======================================================"
-echo " Batch Pipeline — Music Streaming Analytics"
+echo " Lambda Architecture Pipeline"
 echo "======================================================"
 
-# Tìm spark-submit path
-SPARK="docker exec spark-master bash -c"
-SPARK_BIN=$(docker exec spark-master bash -c "which spark-submit 2>/dev/null || find /usr/local -name spark-submit 2>/dev/null | head -1")
-SPARK_SUBMIT="${SPARK_BIN} --master spark://spark-master:7077"
-
-# ── Tạo thư mục HDFS nếu chưa có ────────────────────────────
+# ── Tạo thư mục HDFS ──────────────────────────────────────
 docker exec namenode bash -c "
-    hdfs dfs -mkdir -p /music/raw &&
-    hdfs dfs -mkdir -p /music/streaming &&
+    hdfs dfs -mkdir -p /music/raw
+    hdfs dfs -mkdir -p /music/streaming
     hdfs dfs -mkdir -p /music/batch
 " 2>/dev/null || true
 
-# ── Start Spark Streaming (background) ───────────────────────
+# ══════════════════════════════════════════════════════════
+# SPEED LAYER — Kafka → HDFS (chạy nền, độc lập)
+# ══════════════════════════════════════════════════════════
 echo ""
-echo "[1/5] Start Spark Streaming job (Kafka → HDFS, background)..."
-docker exec -d spark-master bash -c "
-    ${SPARK_BIN} \
-    --master spark://spark-master:7077 \
-    --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0 \
-    /spark-jobs/03_spark_streaming.py \
-    > /tmp/streaming.log 2>&1
-"
+echo "[SPEED] Kiểm tra Kafka..."
+if docker exec kafka kafka-topics --bootstrap-server localhost:9092 --list > /dev/null 2>&1; then
+    echo "[SPEED] Kafka OK — start streaming job (background)..."
+    # Kill job cũ nếu còn chạy
+    docker exec spark-master bash -c "pkill -f 03_spark_streaming || true" 2>/dev/null || true
+    sleep 2
+    docker exec -d spark-master bash -c "
+        /opt/spark/bin/spark-submit \
+        --master spark://spark-master:7077 \
+        /spark-jobs/03_spark_streaming.py \
+        > /tmp/streaming.log 2>&1
+    "
+    echo "[SPEED] Streaming job started → /tmp/streaming.log"
+else
+    echo "[SPEED] Kafka không sẵn sàng — bỏ qua speed layer, batch vẫn chạy bình thường"
+fi
 
-echo "      Đợi parquet files xuất hiện trong HDFS (tối đa 300s)..."
-WAITED=0
-until docker exec namenode hdfs dfs -ls /music/raw/ 2>/dev/null | grep -q ".parquet"; do
-    sleep 5
-    WAITED=$((WAITED + 5))
-    printf "      ... ${WAITED}s\r"
-    if [ $WAITED -ge 300 ]; then
-        echo ""
-        echo "[ERROR] Timeout! Kiểm tra: docker exec spark-master cat /tmp/streaming.log"
-        exit 1
-    fi
-done
-echo "      [OK] Có data sau ${WAITED}s"
-
-# ── Batch jobs ────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════
+# BATCH LAYER — đọc HDFS /music/raw/ (không cần Kafka)
+# ══════════════════════════════════════════════════════════
 echo ""
-echo "[2/5] Spark EDA..."
-$SPARK "$SPARK_SUBMIT /spark-jobs/01_eda.py"
+echo "[BATCH] Kiểm tra data trong HDFS..."
+PARQUET_COUNT=$(docker exec namenode bash -c "hdfs dfs -ls /music/raw/ 2>/dev/null | grep -c '.parquet' || echo 0" 2>/dev/null || echo 0)
+
+if [ "$PARQUET_COUNT" -eq 0 ]; then
+    echo "[BATCH] HDFS /music/raw/ chưa có data."
+    echo "        Đợi streaming job ghi data lần đầu (tối đa 120s)..."
+    WAITED=0
+    until docker exec namenode hdfs dfs -ls /music/raw/ 2>/dev/null | grep -q ".parquet"; do
+        sleep 5
+        WAITED=$((WAITED + 5))
+        printf "        ... ${WAITED}s\r"
+        if [ $WAITED -ge 120 ]; then
+            echo ""
+            echo "[BATCH] Không có data sau 120s."
+            echo "        Kiểm tra streaming: docker exec spark-master cat /tmp/streaming.log"
+            exit 1
+        fi
+    done
+    echo ""
+    echo "[BATCH] Data xuất hiện sau ${WAITED}s, tiếp tục..."
+else
+    echo "[BATCH] Có ${PARQUET_COUNT} parquet files — chạy batch ngay"
+fi
+
+echo ""
+echo "[1/4] Batch EDA..."
+$SPARK_SUBMIT /spark-jobs/01_eda.py
 echo "      [OK]"
 
 echo ""
-echo "[3/5] Spark Analytics..."
-$SPARK "$SPARK_SUBMIT /spark-jobs/02_analytics.py"
+echo "[2/4] Batch Analytics..."
+$SPARK_SUBMIT /spark-jobs/02_analytics.py
 echo "      [OK]"
 
 echo ""
-echo "[4/5] Hive Load..."
-$SPARK "$SPARK_SUBMIT /spark-jobs/04_hive_load.py"
+echo "[3/4] Hive Serving Layer..."
+$SPARK_SUBMIT /spark-jobs/04_hive_load.py
 echo "      [OK]"
 
 echo ""
-echo "[5/5] Export → /data/*.parquet..."
-$SPARK "$SPARK_SUBMIT /spark-jobs/05_export.py"
+echo "[4/4] Export → /data/*.parquet (Streamlit)..."
+$SPARK_SUBMIT /spark-jobs/05_export.py
 echo "      [OK]"
 
 echo ""
 echo "======================================================"
 echo " PIPELINE HOÀN TẤT!"
-echo " Streamlit: http://localhost:8501"
+echo " Streamlit  : http://localhost:8501"
+echo " Spark UI   : http://localhost:8080"
+echo " HDFS UI    : http://localhost:9870"
+echo ""
+echo " Speed layer: docker exec spark-master cat /tmp/streaming.log"
 echo "======================================================"

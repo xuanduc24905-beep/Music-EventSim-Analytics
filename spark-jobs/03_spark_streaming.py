@@ -14,10 +14,9 @@ from pyspark.sql.types import (
 spark = SparkSession.builder \
     .appName("Music Kafka Streaming") \
     .master("spark://spark-master:7077") \
-    .config("spark.executor.memory", "12g") \
-    .config("spark.executor.cores", "8") \
-    .config("spark.sql.shuffle.partitions", "32") \
-    .config("spark.jars.packages", "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0") \
+    .config("spark.executor.memory", "4g") \
+    .config("spark.executor.cores", "2") \
+    .config("spark.sql.shuffle.partitions", "8") \
     .getOrCreate()
 
 spark.sparkContext.setLogLevel("WARN")
