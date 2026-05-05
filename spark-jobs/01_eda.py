@@ -4,6 +4,34 @@
 """
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
+from pyspark.sql.types import (
+    StructType, StructField,
+    StringType, DoubleType, LongType, IntegerType, TimestampType
+)
+import subprocess, sys
+
+RAW_SCHEMA = StructType([
+    StructField("artist",        StringType(),  True),
+    StructField("song",          StringType(),  True),
+    StructField("duration",      DoubleType(),  True),
+    StructField("ts",            LongType(),    True),
+    StructField("userId",        IntegerType(), True),
+    StructField("sessionId",     IntegerType(), True),
+    StructField("page",          StringType(),  True),
+    StructField("level",         StringType(),  True),
+    StructField("location",      StringType(),  True),
+    StructField("userAgent",     StringType(),  True),
+    StructField("gender",        StringType(),  True),
+    StructField("firstName",     StringType(),  True),
+    StructField("lastName",      StringType(),  True),
+    StructField("registration",  LongType(),    True),
+    StructField("itemInSession", IntegerType(), True),
+    StructField("status",        IntegerType(), True),
+    StructField("method",        StringType(),  True),
+    StructField("event_ts",      TimestampType(),True),
+    StructField("kafka_timestamp",TimestampType(),True),
+    StructField("ingestion_time",TimestampType(),True),
+])
 
 spark = SparkSession.builder \
     .appName("Music EDA") \
@@ -15,7 +43,19 @@ spark = SparkSession.builder \
 
 spark.sparkContext.setLogLevel("WARN")
 
-df = spark.read.parquet("hdfs://namenode:9000/music/raw/")
+# Kiểm tra có parquet file thật chưa (không chỉ _spark_metadata)
+result = subprocess.run(
+    ["hdfs", "dfs", "-ls", "hdfs://namenode:9000/music/raw/"],
+    capture_output=True, text=True
+)
+parquet_ready = any(".parquet" in line for line in result.stdout.splitlines())
+if not parquet_ready:
+    print("[ERROR] /music/raw/ chưa có parquet files.")
+    print("        Hãy chạy 03_spark_streaming.py trước và đợi ít nhất 30 giây.")
+    spark.stop()
+    sys.exit(1)
+
+df = spark.read.schema(RAW_SCHEMA).parquet("hdfs://namenode:9000/music/raw/")
 df = df.filter(F.col("page") == "NextSong")
 print(f"Total NextSong events: {df.count():,}")
 df.printSchema()

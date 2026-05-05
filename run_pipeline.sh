@@ -1,20 +1,76 @@
 #!/usr/bin/env bash
 # ============================================================
 #  run_pipeline.sh — Lambda Architecture: Music Streaming Analytics
-#  EventSim → Kafka → Spark (Batch + Streaming) → Hive → Streamlit
+#
+#  Cách dùng:
+#    Terminal 1: bash run_pipeline.sh          → batch pipeline
+#    Terminal 2: bash run_pipeline.sh stream   → chạy streaming job
+#
+#  Thứ tự đúng:
+#    1. Terminal 1: bash run_pipeline.sh       (khởi động services)
+#    2. Terminal 2: bash run_pipeline.sh stream (start Kafka → HDFS)
+#    3. Đợi ~60s có data
+#    4. Terminal 1: bash run_pipeline.sh batch  (chạy EDA → export)
 # ============================================================
 set -e
 
 SPARK="docker exec spark-master bash -c"
 SPARK_SUBMIT="spark-submit --master spark://spark-master:7077"
 
+# ── Chế độ stream: chạy riêng terminal 2 ────────────────────
+if [[ "$1" == "stream" ]]; then
+    echo "======================================================"
+    echo " SPEED LAYER — Spark Streaming (Kafka → HDFS)"
+    echo " Ctrl+C để dừng"
+    echo "======================================================"
+    docker exec spark-master bash -c \
+        "$SPARK_SUBMIT \
+         --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0 \
+         /spark-jobs/03_spark_streaming.py"
+    exit 0
+fi
+
+# ── Chế độ batch: chạy pipeline sau khi đã có data ──────────
+if [[ "$1" == "batch" ]]; then
+    echo "======================================================"
+    echo " BATCH LAYER — Spark Jobs"
+    echo "======================================================"
+
+    echo ""
+    echo "[1/4] Spark EDA (01_eda.py)..."
+    $SPARK "$SPARK_SUBMIT /spark-jobs/01_eda.py"
+    echo "      [OK]"
+
+    echo ""
+    echo "[2/4] Spark Analytics (02_analytics.py)..."
+    $SPARK "$SPARK_SUBMIT /spark-jobs/02_analytics.py"
+    echo "      [OK]"
+
+    echo ""
+    echo "[3/4] Hive Load (04_hive_load.py)..."
+    $SPARK "$SPARK_SUBMIT /spark-jobs/04_hive_load.py"
+    echo "      [OK]"
+
+    echo ""
+    echo "[4/4] Export → /data/*.parquet (05_export.py)..."
+    $SPARK "$SPARK_SUBMIT /spark-jobs/05_export.py"
+    echo "      [OK]"
+
+    echo ""
+    echo "======================================================"
+    echo " BATCH PIPELINE HOÀN TẤT!"
+    echo " Streamlit: http://localhost:8501"
+    echo "======================================================"
+    exit 0
+fi
+
+# ── Mặc định: khởi động toàn bộ services ────────────────────
 echo "======================================================"
 echo " Lambda Architecture — Music Streaming Analytics"
 echo "======================================================"
 
-# ── Step 0: Dọn container cũ + Khởi động services ───────────
 echo ""
-echo "[0/6] Dọn container cũ (tránh lỗi name conflict)..."
+echo "[0/1] Dọn container cũ (tránh lỗi name conflict)..."
 docker compose down --remove-orphans 2>/dev/null || true
 
 echo "      Khởi động Docker services..."
@@ -27,72 +83,32 @@ docker compose up -d \
     streamlit \
     airflow-postgres airflow-webserver airflow-scheduler
 
-echo "      Đợi HDFS + Kafka sẵn sàng (60s)..."
+echo ""
+echo "      Đợi services sẵn sàng (60s)..."
 sleep 60
 
-# ── Step 1: Khởi động EventSim ───────────────────────────────
 echo ""
-echo "[1/6] Khởi động EventSim (music event generator → Kafka)..."
+echo "      Khởi động EventSim..."
 docker compose up -d eventsim
-echo "      [OK] EventSim đang generate events → topic: music-events"
-echo "      Đợi EventSim gửi events (30s)..."
-sleep 30
-
-# ── Step 2: Dump batch data từ Kafka vào HDFS ────────────────
-echo ""
-echo "[2/6] Khởi động Spark Streaming (Kafka → HDFS /music/raw via batch dump)..."
-echo "      Gom dữ liệu từ Kafka 60s rồi lưu HDFS /music/raw/..."
-
-docker exec namenode bash -c "hdfs dfs -mkdir -p /music/raw /music/streaming /music/batch"
-
-# Chạy streaming job ngầm (background) để ghi vào HDFS liên tục
-docker exec -d spark-master bash -c \
-  "$SPARK_SUBMIT \
-   --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0 \
-   /spark-jobs/03_spark_streaming.py" \
-  || echo "[WARN] Streaming job already running or failed — tiếp tục..."
-
-echo "      Streaming job chạy background. Đợi 60s để có đủ data..."
-sleep 60
-
-# ── Step 3: Spark EDA ─────────────────────────────────────────
-echo ""
-echo "[3/6] Spark EDA (01_eda.py)..."
-$SPARK "$SPARK_SUBMIT /spark-jobs/01_eda.py"
-echo "      [OK] EDA stats → HDFS /music/batch/"
-
-# ── Step 4: Analytics ─────────────────────────────────────────
-echo ""
-echo "[4/6] Spark Analytics (02_analytics.py)..."
-$SPARK "$SPARK_SUBMIT /spark-jobs/02_analytics.py"
-echo "      [OK] top songs, artists, retention → HDFS /music/batch/"
-
-# ── Step 5: Hive ──────────────────────────────────────────────
-echo ""
-echo "[5/6] Hive Load + Serving Layer (04_hive_load.py)..."
-$SPARK "$SPARK_SUBMIT /spark-jobs/04_hive_load.py"
-echo "      [OK] Hive tables + merged views đã tạo"
-
-# ── Step 6: Export ────────────────────────────────────────────
-echo ""
-echo "[6/6] Export Serving Layer → /data/*.parquet (05_export.py)..."
-$SPARK "$SPARK_SUBMIT /spark-jobs/05_export.py"
-echo "      [OK] /data/*.parquet sẵn sàng cho Streamlit"
 
 echo ""
 echo "======================================================"
-echo " PIPELINE HOÀN TẤT!"
+echo " Services đã sẵn sàng!"
 echo "======================================================"
 echo ""
-echo " Streamlit Dashboard : http://localhost:8501"
-echo " Spark Master UI     : http://localhost:8080"
-echo " HDFS NameNode UI    : http://localhost:9870"
-echo " YARN ResourceMgr    : http://localhost:8088"
-echo " Airflow             : http://localhost:8083  (admin/admin)"
-echo " HiveServer2 UI      : http://localhost:10002"
+echo " Tiếp theo — mở 2 terminal:"
 echo ""
-echo " EventSim logs       : docker logs -f eventsim"
-echo " Streaming logs      : docker exec spark-master tail -f /tmp/streaming.log"
+echo "   Terminal 2 (Speed Layer — chạy trước, để chạy liên tục):"
+echo "   bash run_pipeline.sh stream"
 echo ""
-echo " Để dừng tất cả: docker compose down"
+echo "   Terminal 1 (Batch Layer — sau khi stream chạy ~60s):"
+echo "   bash run_pipeline.sh batch"
+echo ""
+echo " UIs:"
+echo "   Streamlit   : http://localhost:8501"
+echo "   Spark UI    : http://localhost:8080"
+echo "   HDFS UI     : http://localhost:9870"
+echo "   Airflow     : http://localhost:8083  (admin/admin)"
+echo ""
+echo " Dừng tất cả: docker compose down"
 echo ""
