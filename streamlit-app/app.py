@@ -118,7 +118,6 @@ DARK = dict(
     font=dict(color="#b3b3b3", family="Inter"),
     xaxis=dict(gridcolor="#1e1e1e", linecolor="#282828", tickcolor="#555"),
     yaxis=dict(gridcolor="#1e1e1e", linecolor="#282828", tickcolor="#555"),
-    margin=dict(l=0, r=0, t=30, b=0),
 )
 COLORS = {
     "green":  "#1ed760",
