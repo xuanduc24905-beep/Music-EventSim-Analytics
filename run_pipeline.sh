@@ -1,143 +1,74 @@
 #!/usr/bin/env bash
 # ============================================================
-#  run_pipeline.sh — Lambda Architecture: Music Streaming Analytics
-#  Chạy tuần tự 1 lệnh duy nhất: bash run_pipeline.sh
+#  run_pipeline.sh — Chạy batch pipeline (services phải up sẵn)
+#  Yêu cầu: chạy start_services.sh trước
 # ============================================================
 set -e
 
-SPARK="docker exec spark-master bash -c"
-
 echo "======================================================"
-echo " Lambda Architecture — Music Streaming Analytics"
+echo " Batch Pipeline — Music Streaming Analytics"
 echo "======================================================"
-
-# ── Step 0: Dọn container cũ ─────────────────────────────────
-echo ""
-echo "[0/7] Dọn container cũ (tránh lỗi name conflict)..."
-docker compose down --remove-orphans 2>/dev/null || true
-docker rm -f \
-    namenode datanode1 datanode2 \
-    resourcemanager nodemanager \
-    spark-master spark-worker-1 spark-worker-2 \
-    hive-postgres hive-metastore hive-server \
-    zookeeper kafka eventsim streamlit \
-    airflow-postgres airflow-webserver airflow-scheduler \
-    2>/dev/null || true
-
-# ── Step 1: Khởi động services ───────────────────────────────
-echo ""
-echo "[1/7] Khởi động Docker services..."
-docker compose up -d \
-    namenode datanode1 datanode2 \
-    resourcemanager nodemanager \
-    spark-master spark-worker-1 spark-worker-2 \
-    postgres hive-metastore hive-server \
-    zookeeper kafka \
-    streamlit \
-    airflow-postgres airflow-webserver airflow-scheduler
-
-echo "      Đợi HDFS namenode healthy..."
-until docker exec namenode curl -sf http://localhost:9870 > /dev/null 2>&1; do
-    printf "."; sleep 5
-done
-echo " [OK] HDFS"
-
-echo "      Đợi Kafka sẵn sàng..."
-until docker exec kafka kafka-topics --bootstrap-server localhost:9092 --list > /dev/null 2>&1; do
-    printf "."; sleep 5
-done
-echo " [OK] Kafka"
-
-echo "      Đợi Spark master sẵn sàng..."
-until docker exec spark-master curl -sf http://localhost:8080 > /dev/null 2>&1; do
-    printf "."; sleep 3
-done
-echo " [OK] Spark"
 
 # Tìm spark-submit path
+SPARK="docker exec spark-master bash -c"
 SPARK_BIN=$(docker exec spark-master bash -c "which spark-submit 2>/dev/null || find /usr/local -name spark-submit 2>/dev/null | head -1")
 SPARK_SUBMIT="${SPARK_BIN} --master spark://spark-master:7077"
-echo "      spark-submit: ${SPARK_BIN}"
 
-# ── Step 2: Khởi động EventSim ───────────────────────────────
-echo ""
-echo "[2/7] Khởi động EventSim → Kafka..."
-docker compose up -d eventsim
-echo "      Đợi EventSim gửi events (20s)..."
-sleep 20
-
-# ── Step 3: Tạo thư mục HDFS ─────────────────────────────────
-echo ""
-echo "[3/7] Tạo thư mục HDFS..."
+# ── Tạo thư mục HDFS nếu chưa có ────────────────────────────
 docker exec namenode bash -c "
     hdfs dfs -mkdir -p /music/raw &&
     hdfs dfs -mkdir -p /music/streaming &&
     hdfs dfs -mkdir -p /music/batch
-"
-echo "      [OK]"
+" 2>/dev/null || true
 
-# ── Step 4: Start Spark Streaming job (background) ───────────
+# ── Start Spark Streaming (background) ───────────────────────
 echo ""
-echo "[4/7] Start Spark Streaming job (Kafka → HDFS, chạy background)..."
+echo "[1/5] Start Spark Streaming job (Kafka → HDFS, background)..."
 docker exec -d spark-master bash -c "
-    $SPARK_SUBMIT \
+    ${SPARK_BIN} \
+    --master spark://spark-master:7077 \
     --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0 \
     /spark-jobs/03_spark_streaming.py \
     > /tmp/streaming.log 2>&1
 "
-echo "      Streaming job đang chạy background..."
-echo "      Đợi parquet files xuất hiện trong HDFS (tối đa 120s)..."
 
-# Chờ đến khi có file parquet thật sự trong /music/raw/
+echo "      Đợi parquet files xuất hiện trong HDFS (tối đa 300s)..."
 WAITED=0
 until docker exec namenode hdfs dfs -ls /music/raw/ 2>/dev/null | grep -q ".parquet"; do
     sleep 5
     WAITED=$((WAITED + 5))
-    echo "      ... ${WAITED}s — chờ streaming ghi data..."
+    printf "      ... ${WAITED}s\r"
     if [ $WAITED -ge 300 ]; then
-        echo "[ERROR] Timeout! Streaming chưa ghi được data."
-        echo "        Kiểm tra logs: docker exec spark-master cat /tmp/streaming.log"
+        echo ""
+        echo "[ERROR] Timeout! Kiểm tra: docker exec spark-master cat /tmp/streaming.log"
         exit 1
     fi
 done
-echo "      [OK] Đã có parquet data trong /music/raw/ (sau ${WAITED}s)"
+echo "      [OK] Có data sau ${WAITED}s"
 
-# ── Step 5: Batch Layer ───────────────────────────────────────
+# ── Batch jobs ────────────────────────────────────────────────
 echo ""
-echo "[5/7] Batch Layer — Spark EDA (01_eda.py)..."
+echo "[2/5] Spark EDA..."
 $SPARK "$SPARK_SUBMIT /spark-jobs/01_eda.py"
 echo "      [OK]"
 
 echo ""
-echo "      Batch Layer — Spark Analytics (02_analytics.py)..."
+echo "[3/5] Spark Analytics..."
 $SPARK "$SPARK_SUBMIT /spark-jobs/02_analytics.py"
 echo "      [OK]"
 
-# ── Step 6: Hive ─────────────────────────────────────────────
 echo ""
-echo "[6/7] Hive Load + Serving Layer (04_hive_load.py)..."
+echo "[4/5] Hive Load..."
 $SPARK "$SPARK_SUBMIT /spark-jobs/04_hive_load.py"
 echo "      [OK]"
 
-# ── Step 7: Export ────────────────────────────────────────────
 echo ""
-echo "[7/7] Export → /data/*.parquet (05_export.py)..."
+echo "[5/5] Export → /data/*.parquet..."
 $SPARK "$SPARK_SUBMIT /spark-jobs/05_export.py"
 echo "      [OK]"
 
 echo ""
 echo "======================================================"
 echo " PIPELINE HOÀN TẤT!"
+echo " Streamlit: http://localhost:8501"
 echo "======================================================"
-echo ""
-echo "  Streamlit Dashboard : http://localhost:8501"
-echo "  Spark Master UI     : http://localhost:8080"
-echo "  HDFS NameNode UI    : http://localhost:9870"
-echo "  YARN ResourceMgr    : http://localhost:8088"
-echo "  Airflow             : http://localhost:8083  (admin/admin)"
-echo "  HiveServer2 UI      : http://localhost:10002"
-echo ""
-echo "  Streaming job đang chạy ngầm (EventSim → Kafka → HDFS)"
-echo "  Xem logs : docker exec spark-master cat /tmp/streaming.log"
-echo "  Dừng tất cả: docker compose down"
-echo ""
