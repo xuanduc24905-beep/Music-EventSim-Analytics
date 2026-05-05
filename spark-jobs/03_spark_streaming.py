@@ -90,7 +90,7 @@ df_windowed = df_songs \
         "song",
     ).agg(
         F.count("*").alias("play_count"),
-        F.countDistinct("userId").alias("active_users"),
+        F.approx_count_distinct("userId").alias("active_users"),
         F.round(F.avg("duration"), 1).alias("avg_duration_sec"),
     ) \
     .select(
@@ -112,8 +112,8 @@ query_console = df_songs \
     .groupBy("level") \
     .agg(
         F.count("*").alias("plays"),
-        F.countDistinct("userId").alias("active_users"),
-        F.countDistinct("artist").alias("unique_artists"),
+        F.approx_count_distinct("userId").alias("active_users"),
+        F.approx_count_distinct("artist").alias("unique_artists"),
     ) \
     .writeStream \
     .format("console") \
