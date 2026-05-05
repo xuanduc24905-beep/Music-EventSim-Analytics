@@ -6,7 +6,6 @@
 set -e
 
 SPARK="docker exec spark-master bash -c"
-SPARK_SUBMIT="spark-submit --master spark://spark-master:7077"
 
 echo "======================================================"
 echo " Lambda Architecture — Music Streaming Analytics"
@@ -31,6 +30,11 @@ docker compose up -d \
 
 echo "      Đợi HDFS + Kafka sẵn sàng (60s)..."
 sleep 60
+
+# Tìm spark-submit path sau khi container đã up
+SPARK_BIN=$(docker exec spark-master bash -c "which spark-submit 2>/dev/null || find /usr/local -name spark-submit 2>/dev/null | head -1")
+SPARK_SUBMIT="${SPARK_BIN} --master spark://spark-master:7077"
+echo "      spark-submit: ${SPARK_BIN}"
 
 # ── Step 2: Khởi động EventSim ───────────────────────────────
 echo ""
@@ -67,7 +71,7 @@ until docker exec namenode hdfs dfs -ls /music/raw/ 2>/dev/null | grep -q ".parq
     sleep 5
     WAITED=$((WAITED + 5))
     echo "      ... ${WAITED}s — chờ streaming ghi data..."
-    if [ $WAITED -ge 120 ]; then
+    if [ $WAITED -ge 300 ]; then
         echo "[ERROR] Timeout! Streaming chưa ghi được data."
         echo "        Kiểm tra logs: docker exec spark-master cat /tmp/streaming.log"
         exit 1
