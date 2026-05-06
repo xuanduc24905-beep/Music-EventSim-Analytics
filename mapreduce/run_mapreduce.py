@@ -17,7 +17,6 @@ import os
 import sys
 import time
 import tempfile
-from datetime import datetime
 
 import requests
 
@@ -77,7 +76,7 @@ def map_artist(record: dict):
 def map_hour(record: dict):
     ts = record.get("ts")
     if ts:
-        hour = datetime.utcfromtimestamp(int(ts) / 1000).hour
+        hour = (int(ts) // 3_600_000) % 24  # epoch ms → UTC hour
         return (str(hour).zfill(2), "1")
     return None
 
